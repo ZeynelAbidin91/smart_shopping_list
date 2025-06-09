@@ -1,14 +1,22 @@
 # Smart Fridge Shopping List Generator
 
-This is a Gradio app that helps users generate shopping lists based on images of their refrigerator contents. The app uses computer vision to detect food items, considers dietary preferences and cuisine familiarity, and generates a QR code for easy transfer to your smartphone.
+This is a Gradio app that helps users generate shopping lists based on images of their refrigerator contents. The app uses LlamaIndex's agent system along with Qwen2.5 VLM for image analysis and Claude for intelligent list processing. It considers dietary preferences and cuisine familiarity, and generates a QR code for easy transfer to your smartphone.
 
 ## Features
 
-- Image-based food item detection using computer vision
-- Diet and cuisine preference filtering
-- Interactive shopping list customization
+- Advanced image-based food detection using Qwen2.5 VLM
+- Intelligent list processing with LlamaIndex agents
+- Diet and cuisine preference filtering using Claude
+- Smart complementary item suggestions
 - QR code generation for easy smartphone access
 - User-friendly Gradio interface
+
+## Architecture
+
+The app uses a multi-agent system powered by LlamaIndex:
+- **Image Analysis Agent**: Uses Qwen2.5 VLM for accurate food item detection
+- **Preference Management Agent**: Handles dietary and cuisine preferences
+- **Filtering & Suggestion Agent**: Uses Claude for intelligent list processing
 
 ## Setup
 
