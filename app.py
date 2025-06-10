@@ -1,4 +1,15 @@
 import os
+import torch
+
+# Set OpenMP environment variable to handle multiple runtime versions
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+# Check CUDA availability and set device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
+if device == "cuda":
+    print(f"GPU: {torch.cuda.get_device_name()}")
+
 import uuid
 import json
 import gradio as gr

@@ -11,12 +11,21 @@ import json
 import qrcode
 import io
 import base64
+
+# Set environment variables for better CUDA performance
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # Enable for debugging if needed
+
 from PIL import Image
 from typing import Dict, List, Any, Optional
 from huggingface_hub import InferenceClient
 from llama_index.core.tools import BaseTool
 from loguru import logger
 from pathlib import Path
+from transformers import (
+    Qwen2_5_VLForConditionalGeneration,
+    AutoProcessor
+)
 
 # Suppress warnings
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -24,61 +33,163 @@ warnings.filterwarnings('ignore', message='.*Video processor config.*')
 warnings.filterwarnings('ignore', message='.*configure the model properly.*')
 
 class ImageAnalysisTool(BaseTool):
-    """Tool for analyzing images using Qwen2.5 VLM through Hugging Face Inference API."""
+    """Tool for analyzing images using Qwen2.5 VLM for food detection."""
     name = "image_analyzer"
     description = "Analyzes images to detect food items and their quantities"
-    api_base = "https://api-inference.huggingface.co/models"
-    
-    def __init__(self):
-        super().__init__()
-        self.model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
-        self.client = None
-        
-        try:
-            # Use Hugging Face API token if available
-            hf_token = os.getenv("HUGGINGFACE_TOKEN")
-            if not hf_token:
-                logger.warning("HUGGINGFACE_TOKEN not found in environment variables")
-                logger.info("Falling back to default detection")
-                return
-            
-            # Initialize the inference client
-            self.client = InferenceClient(token=hf_token)
-            logger.info("Successfully initialized Hugging Face Inference API")
-        except Exception as e:
-            logger.error(f"Error initializing Hugging Face API: {str(e)}")
-            logger.info("Falling back to default detection")
 
     @property
     def metadata(self) -> Dict[str, Any]:
-        """Get metadata about the tool."""
+        """Return metadata for the tool."""
         return {
             "name": self.name,
             "description": self.description,
-            "model_name": self.model_name
-        }    def _format_input(self, image_path: str) -> bytes:
-        """Format the input image for the model API."""
-        with Image.open(image_path) as img:
-            if img.mode != "RGB":
-                img = img.convert("RGB")
-            buffer = io.BytesIO()
-            img.save(buffer, format="JPEG")
-            return buffer.getvalue()
+            "parameters": {
+                "image_path": {
+                    "type": "string",
+                    "description": "Path to the image file to analyze"
+                }
+            }
+        }
 
-    def __call__(self, image_path: str) -> List[Dict[str, Any]]:
-        """Process image and detect food items."""
-        if not self.client:
-            return self._fallback_detection()
+    def __init__(self):
+        super().__init__()
+        self.model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
+        
+        # Try to use CUDA first, fallback to CPU if issues occur
+        try:
+            if torch.cuda.is_available():
+                self.device = "cuda"
+                # Test CUDA functionality
+                test_tensor = torch.randn(1, device="cuda")
+                del test_tensor
+                torch.cuda.empty_cache()
+                print(f"Using device: {self.device}")
+                print(f"GPU: {torch.cuda.get_device_name()}")
+                print(f"CUDA Version: {torch.version.cuda}")
+                print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+            else:
+                self.device = "cpu"
+                print("CUDA not available, using CPU")
+        except Exception as e:
+            print(f"CUDA test failed: {str(e)}")
+            self.device = "cpu"
+            print("Falling back to CPU")
             
         try:
-            # Format prompt and send request to Hugging Face
-            inputs = self._format_prompt(image_path)
-            response = self.client.post(
-                json=inputs,
-                model=self.model_name
+            self.processor = AutoProcessor.from_pretrained(
+                self.model_name,
+                use_fast=True  # Enable fast tokenizer
             )
             
-            # Parse the response
+            # Configure model loading based on device
+            model_kwargs = {
+                "low_cpu_mem_usage": True
+            }
+            
+            if self.device == "cuda":
+                model_kwargs.update({
+                    "torch_dtype": torch.float16,
+                    "device_map": "auto",
+                    "max_memory": {0: "7GiB"}  # Leave some memory for other processes
+                })
+            else:
+                model_kwargs.update({
+                    "torch_dtype": torch.float32
+                })
+            
+            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                self.model_name,
+                **model_kwargs
+            )
+            
+            # Move to CPU if not using device_map
+            if self.device == "cpu":
+                self.model = self.model.to(self.device)
+                
+            print(f"Model successfully loaded on {self.device}")
+                
+        except Exception as e:
+            logger.error(f"Error loading model: {str(e)}")
+            print(f"Model loading failed, falling back to CPU if not already")
+            
+            # Try loading on CPU as fallback
+            if self.device != "cpu":
+                self.device = "cpu"
+                try:
+                    self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                        self.model_name,
+                        torch_dtype=torch.float32,
+                        low_cpu_mem_usage=True
+                    ).to(self.device)
+                    self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
+                    print("Successfully loaded model on CPU as fallback")
+                except Exception as e2:
+                    logger.error(f"CPU fallback also failed: {str(e2)}")
+                    self.model = None
+                    self.processor = None
+            else:
+                self.model = None
+                self.processor = None
+
+    def _format_prompt(self, image) -> str:
+        """Format the prompt for food detection."""
+        return "Look at this image and list all food items you can see. For each item, provide the quantity (if visible) and name. Format your response as a comma-separated list like '2 apples, 1 milk carton, 3 eggs'. Focus on food items that might need restocking."
+        
+    def __call__(self, image_path: str) -> List[Dict[str, Any]]:
+        """Process image and detect food items."""
+        if not self.model or not self.processor:
+            return self._fallback_detection()
+        
+        try:
+            # Load and process image
+            image = Image.open(image_path)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+
+            # Prepare prompt - use proper format for Qwen2.5-VL
+            prompt = self._format_prompt(image)
+            
+            # Create conversation format expected by Qwen2.5-VL
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": prompt}
+                    ]
+                }
+            ]
+            
+            # Apply chat template
+            text_input = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            
+            # Process inputs
+            inputs = self.processor(
+                text=[text_input], 
+                images=[image], 
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+            
+            # Generate response
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    do_sample=False,
+                    temperature=None,
+                    pad_token_id=self.processor.tokenizer.eos_token_id
+                )
+            
+            # Decode response
+            input_len = inputs['input_ids'].shape[1]
+            response = self.processor.decode(
+                outputs[0][input_len:], 
+                skip_special_tokens=True
+            )
+            
             return self._parse_model_response(response)
             
         except Exception as e:
@@ -87,41 +198,35 @@ class ImageAnalysisTool(BaseTool):
 
     def _parse_model_response(self, response: str) -> List[Dict[str, Any]]:
         """Parse the model's response into structured format."""
-        try:
-            items = []
-            # Split on commas and process each item
-            for item in response.split(","):
-                item = item.strip()
-                if not item:
-                    continue
-                    
-                # Try to extract quantity and name
-                match = re.search(r"(\d+(?:\.\d+)?(?:\s*[a-zA-Z]+)?)\s*(.*)", item)
-                if match:
-                    quantity, name = match.groups()
+        items = []
+        # Split on commas and process each item
+        for item in response.split(","):
+            item = item.strip()
+            if not item:
+                continue
+                
+            # Try to extract quantity and name
+            match = re.search(r"(\d+(?:\.\d+)?(?:\s*[a-zA-Z]+)?)\s*(.*)", item)
+            if match:
+                quantity, name = match.groups()
+            else:
+                parts = item.split()
+                if len(parts) > 1 and parts[0].replace(".", "").isdigit():
+                    quantity = parts[0]
+                    name = " ".join(parts[1:])
                 else:
-                    parts = item.split()
-                    if len(parts) > 1 and parts[0].replace(".", "").isdigit():
-                        quantity = parts[0]
-                        name = " ".join(parts[1:])
-                    else:
-                        quantity = "1"
-                        name = item
-                        
-                items.append({
-                    "name": name.strip().lower(),
-                    "quantity": quantity.strip()
-                })
-            return items
-        except Exception as e:
-            logger.error(f"Error parsing model response: {str(e)}")
-            return []
+                    quantity = "1"
+                    name = item
+                    
+            items.append({
+                "name": name.strip().lower(),
+                "quantity": quantity.strip()
+            })
+        return items
 
     def _fallback_detection(self) -> List[Dict[str, Any]]:
         """Fallback method when image processing fails."""
-        return [
-            {"name": "unknown item", "quantity": "1"}
-        ]
+        return [{"name": "unknown item", "quantity": "1"}]
 
 class ShoppingListItem:
     """Represents a single item in the shopping list."""
