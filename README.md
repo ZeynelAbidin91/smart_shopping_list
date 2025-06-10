@@ -1,22 +1,30 @@
-# Smart Fridge Shopping List Generator
+# Smart Fridge Shopping List Generator & AI Meal Planner
 
-This is a Gradio app that helps users generate shopping lists based on images of their refrigerator contents. The app uses LlamaIndex's agent system along with Qwen2.5 VLM for image analysis and Claude for intelligent list processing. It considers dietary preferences and cuisine familiarity, and generates a QR code for easy transfer to your smartphone.
+This is a comprehensive Gradio app that helps users generate shopping lists based on images of their refrigerator contents and create personalized meal plans using AI. The app uses LlamaIndex's agent system with Qwen2.5 VLM for image analysis and OpenAI's GPT-4o mini for intelligent meal planning.
 
 ## Features
 
+### 📱 Shopping List Generator
 - Advanced image-based food detection using Qwen2.5 VLM
 - Intelligent list processing with LlamaIndex agents
-- Diet and cuisine preference filtering using Claude
+- Diet and cuisine preference filtering
 - Smart complementary item suggestions
 - QR code generation for easy smartphone access
-- User-friendly Gradio interface
+
+### 🍽️ AI Meal Planner
+- Personalized meal plan generation using OpenAI GPT-4o mini
+- Support for 1-30 day meal plans
+- Multiple cuisine preferences (Italian, Mexican, Indian, Japanese, etc.)
+- Dietary restriction support (Vegetarian, Vegan, Keto, Gluten-Free, etc.)
+- Per-day meal regeneration for customization
+- Detailed meal descriptions and instructions
 
 ## Architecture
 
-The app uses a multi-agent system powered by LlamaIndex:
+The app uses a multi-agent system powered by LlamaIndex and OpenAI:
 - **Image Analysis Agent**: Uses Qwen2.5 VLM for accurate food item detection
-- **Preference Management Agent**: Handles dietary and cuisine preferences
-- **Filtering & Suggestion Agent**: Uses Claude for intelligent list processing
+- **Shopping List Agent**: Handles dietary preferences and smart suggestions
+- **Meal Planning Service**: Uses OpenAI GPT-4o mini for personalized meal plans
 
 ## Setup
 
@@ -31,6 +39,18 @@ The app uses a multi-agent system powered by LlamaIndex:
    pip install -r requirements.txt
    ```
 
+3. Set up environment variables:
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your OpenAI API key
+   ```
+
+## API Keys Required
+
+- **OpenAI API Key**: Required for the AI Meal Planner feature
+  - Get your key from: https://platform.openai.com/api-keys
+  - Add to `.env` file as: `OPENAI_API_KEY=your_key_here`
+
 ## Running the App
 
 1. Activate your virtual environment if not already active
@@ -42,13 +62,29 @@ The app uses a multi-agent system powered by LlamaIndex:
 
 ## Usage
 
-1. Upload a photo of your refrigerator contents
-2. Select your dietary preferences
-3. Enter cuisines you're familiar with (comma-separated)
-4. Click "Process Image" to generate the initial list
-5. Adjust quantities and select/deselect items as needed
-6. Click "Generate QR Code" to create a QR code
-7. Scan the QR code with your smartphone's camera to view the list
+### Shopping List Generator
+1. Navigate to the "Shopping List Generator" tab
+2. Upload a photo of your refrigerator contents
+3. Select your dietary preferences
+4. Enter cuisines you're familiar with
+5. Click "Generate Shopping List"
+6. Get your personalized shopping list and QR code
+
+### AI Meal Planner
+1. Navigate to the "AI Meal Planner" tab
+2. Set your desired plan duration (1-30 days)
+3. Select cuisine preferences (Italian, Mexican, Indian, etc.)
+4. Choose dietary restrictions (Vegetarian, Vegan, Keto, etc.)
+5. Add any additional notes (allergies, dislikes)
+6. Click "Generate My Plan"
+7. Use "Regenerate Day" to customize specific days
+
+## Testing
+
+Test the meal planner functionality:
+```bash
+python test_meal_planner.py
+```
 
 ## How It Works
 
