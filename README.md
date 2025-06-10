@@ -19,6 +19,13 @@ This is a comprehensive Gradio app that helps users generate shopping lists base
 - Per-day meal regeneration for customization
 - Detailed meal descriptions and instructions
 
+### 🛒 Smart Shopping List Generator
+- **From Meal Plans**: Generate comprehensive shopping lists from confirmed meal plans
+- **Smart Filtering**: Automatically detects items you likely already have in your pantry
+- **Categorized Lists**: Organized by categories (Produce, Pantry Staples, Protein, etc.)
+- **Status Indicators**: Visual distinction between items to buy vs. items in pantry
+- **QR Code Export**: Generate QR codes containing only items you need to purchase
+
 ## Architecture
 
 The app uses a multi-agent system powered by LlamaIndex and OpenAI:
@@ -78,12 +85,31 @@ The app uses a multi-agent system powered by LlamaIndex and OpenAI:
 5. Add any additional notes (allergies, dislikes)
 6. Click "Generate My Plan"
 7. Use "Regenerate Day" to customize specific days
+8. Click "Create Shopping List" to generate a smart shopping list
+
+### Smart Shopping List
+1. After generating a meal plan, click "Create Shopping List"
+2. View the categorized shopping list in the "Smart Shopping List" tab
+3. Items are automatically sorted into categories (Produce, Pantry Staples, etc.)
+4. Items you likely have are marked "in pantry" and crossed out
+5. Generate a QR code containing only items you need to buy
+6. Use the QR code for convenient mobile shopping
 
 ## Testing
 
 Test the meal planner functionality:
 ```bash
 python test_meal_planner.py
+```
+
+Test the shopping list generation:
+```bash
+python test_shopping_list.py
+```
+
+Test the complete workflow:
+```bash
+python test_shopping_list.py  # Includes full workflow test
 ```
 
 ## How It Works
