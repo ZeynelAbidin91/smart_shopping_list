@@ -1,8 +1,9 @@
 import os
-import torch
 
-# Set OpenMP environment variable to handle multiple runtime versions
+# Set OpenMP environment variable to handle multiple runtime versions - MUST be before any other imports
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+import torch
 
 # Check CUDA availability and set device
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -10,13 +11,9 @@ print(f"Using device: {device}")
 if device == "cuda":
     print(f"GPU: {torch.cuda.get_device_name()}")
 
-import uuid
 import json
 import gradio as gr
-from PIL import Image
-import numpy as np
 import qrcode
-import base64
 import io
 import logging
 from typing import List, Dict, Any, Tuple
@@ -37,6 +34,18 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 logger.info("Environment variables loaded")
 
+# Check OpenAI API key
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if not openai_api_key:
+    logger.warning("OPENAI_API_KEY environment variable is not set. Meal planning feature will not be available.")
+    print("\n⚠️ WARNING: OpenAI API key not found in .env file!")
+    print("⚠️ Please add your API key to the .env file to enable meal planning.")
+    print("⚠️ Continuing with limited functionality (image analysis only)...")
+    HAS_OPENAI_API_KEY = False
+else:
+    logger.info(f"OpenAI API key found (length: {len(openai_api_key)})")
+    HAS_OPENAI_API_KEY = True
+
 # Global state for user preferences
 user_preferences = {
     "diet": None,
@@ -45,7 +54,22 @@ user_preferences = {
 
 # Initialize the shopping list agent and meal planner
 shopping_list_agent = ShoppingListAgent()
-meal_planner_service = MealPlannerService()
+
+try:
+    meal_planner_service = MealPlannerService()
+    MEAL_PLANNING_ENABLED = True
+    logger.info("Meal planner service initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize meal planner service: {str(e)}")
+    print(f"\n⚠️ ERROR: Could not initialize meal planner: {str(e)}")
+    print("⚠️ Meal planning feature will be disabled")
+    print("⚠️ Please check your OpenAI API key in the .env file")
+    MEAL_PLANNING_ENABLED = False
+    # Create a dummy meal planner service that returns empty results
+    class DummyMealPlannerService:
+        def generate_meal_plan(self, *args, **kwargs):
+            return {"error": "Meal planning is not available. Please check your OpenAI API key."}
+    meal_planner_service = DummyMealPlannerService()
 
 # Global state for meal plans
 meal_plan_state = {

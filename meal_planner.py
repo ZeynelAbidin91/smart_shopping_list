@@ -7,6 +7,10 @@ import json
 import logging
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
+
+# Set OpenMP environment variable to handle multiple runtime versions
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -56,8 +60,31 @@ class MealPlannerService:
     
     def __init__(self):
         """Initialize the meal planner service."""
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.model = "gpt-4o-mini"
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set. Please add it to your .env file.")
+        
+        try:
+            logger.info("Initializing OpenAI client...")
+            self.client = OpenAI(api_key=api_key)
+            self.model = "gpt-4o-mini"
+            logger.info("OpenAI client initialized successfully")
+            
+            # Test the API key with a small request
+            logger.info("Testing OpenAI API connection...")
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Test"}
+                ],
+                max_tokens=5
+            )
+            logger.info("OpenAI API connection test successful")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
+            raise ValueError(f"Failed to initialize OpenAI client: {str(e)}")
         
     def generate_meal_plan(self, request: MealPlanRequest) -> Dict[str, Any]:
         """
@@ -168,7 +195,7 @@ class MealPlannerService:
     
     def generate_shopping_list(self, meal_plan: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Generate a shopping list from a confirmed meal plan.
+        Generate a smart shopping list from a confirmed meal plan.
         
         Args:
             meal_plan: List of daily meal plans
@@ -322,70 +349,76 @@ Return only the JSON object, no other text."""
         }
     
     def _generate_initial_shopping_list(self, meal_plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Generate initial shopping list from meal plan using OpenAI."""
+        """
+        Generate initial shopping list from meal plan using LLM.
+        
+        Args:
+            meal_plan: List of daily meal plans
+            
+        Returns:
+            List of shopping list categories
+        """
         try:
-            # Convert meal plan to JSON string for the prompt
-            meal_plan_json = json.dumps(meal_plan, indent=2)
+            # Build the prompt for ingredient extraction
+            prompt = self._build_shopping_list_prompt(meal_plan)
             
-            # Construct the prompt for ingredient extraction
-            prompt = f"""Analyze the following JSON meal plan and generate a comprehensive, categorized shopping list.
-
-Meal Plan:
-{meal_plan_json}
-
-Instructions:
-- Extract every single ingredient required to make all the meals
-- Consolidate duplicate ingredients and sum their quantities (e.g., if one recipe needs 1 onion and another needs 1 onion, the list should have '2 onions')
-- Group the items into logical categories: Produce, Dairy & Alternatives, Protein, Pantry Staples, Spices & Oils, Other
-- Provide estimated quantities for each item (e.g., "2 large" onions, "200g" of tofu, "1 cup" of lentils)
-
-Output Format:
-Return ONLY a valid JSON object. The root key should be "shoppingList", containing an array of category objects. Each category object must have a "category" name and an array of "items". Each item object must have an "item" name and a "quantity".
-
-Example: {{"shoppingList": [{{"category": "Produce", "items": [{{"item": "Onion", "quantity": "2 large"}}, {{"item": "Garlic", "quantity": "3 cloves"}}]}}, {{"category": "Pantry Staples", "items": [{{"item": "Olive Oil", "quantity": "50ml"}}]}}]}}"""
-            
-            # Make API call to OpenAI
+            # Call OpenAI API
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a professional chef and nutritionist. Generate comprehensive shopping lists from meal plans with accurate quantities and proper categorization."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
+                    {"role": "system", "content": "You are a helpful assistant that extracts ingredients from meal plans and creates organized shopping lists."},
+                    {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,  # Lower temperature for more consistent output
-                max_tokens=2000
+                max_tokens=2000,
+                temperature=0.3
             )
             
             # Parse the response
-            content = response.choices[0].message.content.strip()
-            shopping_list_data = self._parse_shopping_list_response(content)
+            shopping_list = self._parse_shopping_list_response(response.choices[0].message.content)
             
-            return shopping_list_data
+            logger.info(f"Generated initial shopping list with {len(shopping_list)} categories")
+            return shopping_list
             
         except Exception as e:
             logger.error(f"Error generating initial shopping list: {e}")
             raise
     
     def _filter_shopping_list_with_pantry(self, shopping_list_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Filter shopping list by checking against pantry contents."""
+        """
+        Filter shopping list by removing items detected in pantry.
+        
+        Args:
+            shopping_list_data: Initial shopping list data
+            
+        Returns:
+            Filtered shopping list with status annotations
+        """
         try:
-            # Import the ImageAnalysisTool here to avoid circular imports
+            # Import ImageAnalysisTool here to avoid circular imports
             from llama_agents import ImageAnalysisTool
-            
-            # Initialize the image analysis tool
-            image_tool = ImageAnalysisTool()
-            
-            # Simulate pantry detection - in a real scenario, this would analyze a pantry image
-            # For now, we'll use a fallback method or assume no items detected
-            detected_items = self._get_pantry_items(image_tool)
-            
-            # Convert detected items to lowercase for case-insensitive matching
-            detected_items_lower = [item.lower() for item in detected_items]
+              # Get pantry items using ImageAnalysisTool
+            pantry_items = []
+            try:
+                image_tool = ImageAnalysisTool()
+                
+                # In a real implementation, you would pass the path to a pantry image
+                # For now, we'll simulate with a placeholder or use a default pantry image
+                # pantry_items = image_tool.detectItems("path/to/pantry/image.jpg")
+                
+                # For testing purposes, we'll use a hybrid approach:
+                # Try to detect from a default pantry image if it exists, otherwise use mock
+                pantry_image_path = os.path.join(os.path.dirname(__file__), "default_pantry.jpg")
+                if os.path.exists(pantry_image_path):
+                    pantry_items = image_tool.detectItems(pantry_image_path)
+                    logger.info(f"Detected {len(pantry_items)} items from pantry image: {pantry_items}")
+                else:
+                    # If no pantry image is available, fall back to mock
+                    pantry_items = self._mock_detect_pantry_items()
+                    logger.info(f"Using mock pantry detection: {pantry_items}")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to detect pantry items: {e}. Using mock detection.")
+                pantry_items = self._mock_detect_pantry_items()
             
             # Filter the shopping list
             filtered_list = []
@@ -396,78 +429,88 @@ Example: {{"shoppingList": [{{"category": "Produce", "items": [{{"item": "Onion"
                 }
                 
                 for item in category["items"]:
+                    # Check if item is in pantry (case-insensitive partial matching)
                     item_name = item["item"].lower()
+                    is_in_pantry = any(
+                        pantry_item.lower() in item_name or item_name in pantry_item.lower()
+                        for pantry_item in pantry_items
+                    )
                     
-                    # Check if item is already in pantry (partial match)
-                    status = "needed"
-                    for detected_item in detected_items_lower:
-                        if (item_name in detected_item or 
-                            detected_item in item_name or
-                            any(word in detected_item for word in item_name.split() if len(word) > 3)):
-                            status = "in_pantry"
-                            break
-                    
-                    # Add status to item
+                    # Add status field
                     filtered_item = {
                         "item": item["item"],
                         "quantity": item["quantity"],
-                        "status": status
+                        "status": "in_pantry" if is_in_pantry else "needed"
                     }
+                    
                     filtered_category["items"].append(filtered_item)
                 
                 filtered_list.append(filtered_category)
             
+            logger.info("Successfully filtered shopping list with pantry items")
             return filtered_list
             
         except Exception as e:
-            logger.warning(f"Error filtering shopping list with pantry: {e}")
-            # If filtering fails, return unfiltered list with all items marked as needed
-            return self._mark_all_items_as_needed(shopping_list_data)
+            logger.error(f"Error filtering shopping list: {e}")            # Return original list with all items marked as 'needed'
+            for category in shopping_list_data:
+                for item in category["items"]:
+                    item["status"] = "needed"
+            return shopping_list_data
     
-    def _get_pantry_items(self, image_tool) -> List[str]:
-        """Get pantry items using ImageAnalysisTool or fallback method."""
-        try:
-            # Try to detect items from a default pantry image if available
-            # For now, return a simulated pantry content
-            # In a real implementation, this would call image_tool.detectItems()
-            
-            # Simulate common pantry items that users typically have
-            common_pantry_items = [
-                'salt', 'pepper', 'olive oil', 'onion', 'garlic', 'milk', 
-                'eggs', 'flour', 'sugar', 'rice', 'pasta', 'bread',
-                'butter', 'cooking oil', 'vinegar', 'soy sauce'
-            ]
-            
-            logger.info("Using simulated pantry items for filtering")
-            return common_pantry_items
-            
-        except Exception as e:
-            logger.warning(f"Failed to get pantry items: {e}")
-            return []
+    def _mock_detect_pantry_items(self) -> List[str]:
+        """
+        Fallback function to simulate pantry detection when ImageAnalysisTool fails.
+        The main implementation now tries to use ImageAnalysisTool.detectItems() first.
+        """
+        # This simulates common pantry items that users typically have
+        return [
+            'salt', 'pepper', 'olive oil', 'garlic', 'onion', 'butter', 
+            'flour', 'sugar', 'eggs', 'milk', 'rice', 'pasta'
+        ]
     
-    def _mark_all_items_as_needed(self, shopping_list_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Mark all items as needed if pantry detection fails."""
-        filtered_list = []
-        for category in shopping_list_data:
-            filtered_category = {
-                "category": category["category"],
-                "items": []
-            }
-            
-            for item in category["items"]:
-                filtered_item = {
-                    "item": item["item"],
-                    "quantity": item["quantity"],
-                    "status": "needed"
-                }
-                filtered_category["items"].append(filtered_item)
-            
-            filtered_list.append(filtered_category)
+    def _build_shopping_list_prompt(self, meal_plan: List[Dict[str, Any]]) -> str:
+        """
+        Build the prompt for shopping list generation.
         
-        return filtered_list
+        Args:
+            meal_plan: List of daily meal plans
+            
+        Returns:
+            Formatted prompt string
+        """
+        meal_plan_json = json.dumps(meal_plan, indent=2)
+        
+        prompt = f"""Analyze the following JSON meal plan and generate a comprehensive, categorized shopping list.
+
+Meal Plan:
+{meal_plan_json}
+
+Instructions:
+1. Extract every single ingredient required to make all the meals.
+2. Consolidate duplicate ingredients and sum their quantities (e.g., if one recipe needs 1 onion and another needs 1 onion, the list should have '2 onions').
+3. Group the items into logical categories: Produce, Dairy & Alternatives, Protein, Pantry Staples, Spices & Oils, Other.
+4. Provide estimated quantities for each item (e.g., "2 large" onions, "200g" of tofu, "1 cup" of lentils).
+5. Be comprehensive but practical - include all necessary ingredients.
+
+Output Format:
+Return ONLY a valid JSON object. The root key should be "shoppingList", containing an array of category objects. Each category object must have a "category" name and an array of "items". Each item object must have an "item" name and a "quantity".
+
+Example: {{"shoppingList": [{{"category": "Produce", "items": [{{"item": "Onion", "quantity": "2 large"}}, {{"item": "Garlic", "quantity": "3 cloves"}}]}}, {{"category": "Pantry Staples", "items": [{{"item": "Rice", "quantity": "2 cups"}}]}}]}}
+
+Important: Return ONLY the JSON object, no additional text or explanation."""
+        
+        return prompt
     
     def _parse_shopping_list_response(self, content: str) -> List[Dict[str, Any]]:
-        """Parse the shopping list response from OpenAI."""
+        """
+        Parse the shopping list response from OpenAI.
+        
+        Args:
+            content: Response content from OpenAI
+            
+        Returns:
+            List of shopping list categories
+        """
         try:
             # Try to find JSON in the response
             start_idx = content.find('{')

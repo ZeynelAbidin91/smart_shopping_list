@@ -4,24 +4,21 @@ LlamaIndex-based agents for the Smart Fridge Shopping List Generator.
 
 import os
 import re
-import uuid
 import warnings
 import torch
 import json
-import qrcode
-import io
-import base64
+
+# Set OpenMP environment variable to handle multiple runtime versions
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
 # Set environment variables for better CUDA performance
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
-os.environ['CUDA_LAUNCH_BLOCKING'] = '0'  # Enable for debugging if needed
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # Enable for better debugging
 
 from PIL import Image
 from typing import Dict, List, Any, Optional
-from huggingface_hub import InferenceClient
 from llama_index.core.tools import BaseTool
 from loguru import logger
-from pathlib import Path
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     AutoProcessor
@@ -54,83 +51,102 @@ class ImageAnalysisTool(BaseTool):
     def __init__(self):
         super().__init__()
         self.model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
+        self.device = "cpu"  # Default to CPU
+        self.model = None
+        self.processor = None
         
-        # Try to use CUDA first, fallback to CPU if issues occur
-        try:
-            if torch.cuda.is_available():
-                self.device = "cuda"
-                # Test CUDA functionality
-                test_tensor = torch.randn(1, device="cuda")
-                del test_tensor
-                torch.cuda.empty_cache()
-                print(f"Using device: {self.device}")
-                print(f"GPU: {torch.cuda.get_device_name()}")
-                print(f"CUDA Version: {torch.version.cuda}")
-                print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-            else:
-                self.device = "cpu"
-                print("CUDA not available, using CPU")
-        except Exception as e:
-            print(f"CUDA test failed: {str(e)}")
-            self.device = "cpu"
-            print("Falling back to CPU")
+        # Initialize device with safer approach
+        self._initialize_device()
+        
+        # Load model and processor
+        self._load_model()
+
+    def _initialize_device(self):
+        """Initialize device with safer CUDA testing."""
+        if not torch.cuda.is_available():
+            print("CUDA not available, using CPU")
+            return
             
         try:
+            print("CUDA is available, testing compatibility...")
+            
+            # Basic CUDA test - less likely to trigger kernel errors
+            with torch.cuda.device(0):
+                # Simple tensor creation and operations
+                test_tensor = torch.ones(10, device="cuda")
+                result = test_tensor + 1
+                
+                # If we get here, basic CUDA works
+                device_info = torch.cuda.get_device_properties(0)
+                print(f"✓ GPU: {torch.cuda.get_device_name()}")
+                print(f"✓ CUDA Capability: {device_info.major}.{device_info.minor}")
+                print(f"✓ GPU Memory: {device_info.total_memory / 1024**3:.1f} GB")
+                
+                # Don't immediately switch to CUDA - we'll handle device selection in model loading
+                # based on model compatibility with this GPU
+                
+                # Clean up test tensors
+                del test_tensor, result
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            print(f"✗ CUDA test failed: {str(e)}")
+            print("✗ Falling back to CPU mode for compatibility")
+            # Clean up any GPU memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    def _load_model(self):
+        """Load model with safe fallback strategies."""
+        try:
+            print("Loading model processor...")
             self.processor = AutoProcessor.from_pretrained(
                 self.model_name,
-                use_fast=True  # Enable fast tokenizer
+                use_fast=True
             )
+            print("✓ Processor loaded successfully")
             
-            # Configure model loading based on device
+            # First try: Load with automatic device mapping (safest approach)
+            print(f"Loading {self.model_name} model with automatic device mapping...")
+            
+            # Configure model loading - use lower precision for CUDA
             model_kwargs = {
-                "low_cpu_mem_usage": True
+                "low_cpu_mem_usage": True,
+                "torch_dtype": torch.float16,
+                "device_map": "auto"
             }
             
-            if self.device == "cuda":
-                model_kwargs.update({
-                    "torch_dtype": torch.float16,
-                    "device_map": "auto",
-                    "max_memory": {0: "7GiB"}  # Leave some memory for other processes
-                })
-            else:
-                model_kwargs.update({
-                    "torch_dtype": torch.float32
-                })
-            
+            # Try loading with auto device mapping
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_name,
                 **model_kwargs
             )
             
-            # Move to CPU if not using device_map
-            if self.device == "cpu":
-                self.model = self.model.to(self.device)
-                
-            print(f"Model successfully loaded on {self.device}")
+            # Check where model was loaded
+            if any(p.device.type == "cuda" for p in self.model.parameters()):
+                self.device = "cuda"
+                print(f"✓ Model loaded successfully with GPU acceleration")
+            else:
+                self.device = "cpu"
+                print(f"✓ Model loaded on CPU (automatic device mapping decision)")
                 
         except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
-            print(f"Model loading failed, falling back to CPU if not already")
+            print(f"✗ Automatic device mapping failed: {str(e)}")
             
-            # Try loading on CPU as fallback
-            if self.device != "cpu":
+            # Second try: Explicit CPU loading
+            try:
+                print("Trying explicit CPU loading...")
                 self.device = "cpu"
-                try:
-                    self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                        self.model_name,
-                        torch_dtype=torch.float32,
-                        low_cpu_mem_usage=True
-                    ).to(self.device)
-                    self.processor = AutoProcessor.from_pretrained(self.model_name, use_fast=True)
-                    print("Successfully loaded model on CPU as fallback")
-                except Exception as e2:
-                    logger.error(f"CPU fallback also failed: {str(e2)}")
-                    self.model = None
-                    self.processor = None
-            else:
+                self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch.float32,
+                    low_cpu_mem_usage=True
+                ).to("cpu")
+                print("✓ Successfully loaded model on CPU")
+            except Exception as e2:
+                print(f"✗ CPU loading also failed: {str(e2)}")
                 self.model = None
-                self.processor = None
-
+                logger.error("Complete model loading failure - using fallback detection")    
     def _format_prompt(self, image) -> str:
         """Format the prompt for food detection."""
         return "Look at this image and list all food items you can see. For each item, provide the quantity (if visible) and name. Format your response as a comma-separated list like '2 apples, 1 milk carton, 3 eggs'. Focus on food items that might need restocking."
@@ -138,6 +154,7 @@ class ImageAnalysisTool(BaseTool):
     def __call__(self, image_path: str) -> List[Dict[str, Any]]:
         """Process image and detect food items."""
         if not self.model or not self.processor:
+            logger.warning("Model or processor not available, using fallback detection")
             return self._fallback_detection()
         
         try:
@@ -165,23 +182,61 @@ class ImageAnalysisTool(BaseTool):
                 messages, tokenize=False, add_generation_prompt=True
             )
             
-            # Process inputs
-            inputs = self.processor(
-                text=[text_input], 
-                images=[image], 
-                return_tensors="pt",
-                padding=True
-            ).to(self.device)
-            
-            # Generate response
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=100,
-                    do_sample=False,
-                    temperature=None,
-                    pad_token_id=self.processor.tokenizer.eos_token_id
-                )
+            # Process inputs - first try with current device (could be GPU)
+            try:
+                logger.info(f"Processing inputs using device: {self.device}")
+                inputs = self.processor(
+                    text=[text_input], 
+                    images=[image], 
+                    return_tensors="pt",
+                    padding=True
+                ).to(self.device)
+                
+                # Generate response with safer settings
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=100,
+                        do_sample=False,
+                        temperature=None,
+                        pad_token_id=self.processor.tokenizer.eos_token_id
+                    )
+                
+            except RuntimeError as cuda_err:
+                # Check if this is a CUDA error
+                if "CUDA" in str(cuda_err) or "cuda" in str(cuda_err) or "kernel image" in str(cuda_err):
+                    logger.warning(f"CUDA error during image processing: {str(cuda_err)}")
+                    logger.warning("Falling back to CPU mode for this operation")
+                    
+                    # If we were using CUDA, switch to CPU for this operation
+                    if self.device == "cuda":
+                        # Process inputs on CPU instead
+                        inputs = self.processor(
+                            text=[text_input], 
+                            images=[image], 
+                            return_tensors="pt",
+                            padding=True
+                        ).to("cpu")
+                        
+                        # Move model to CPU temporarily for this operation
+                        logger.info("Moving model to CPU for this operation")
+                        self.model = self.model.to("cpu")
+                        
+                        # Generate response on CPU
+                        with torch.no_grad():
+                            outputs = self.model.generate(
+                                **inputs,
+                                max_new_tokens=100,
+                                do_sample=False,
+                                temperature=None,
+                                pad_token_id=self.processor.tokenizer.eos_token_id
+                            )
+                    else:
+                        # If we're already on CPU and still getting CUDA errors, something else is wrong
+                        raise cuda_err
+                else:
+                    # Not a CUDA error, re-raise
+                    raise cuda_err
             
             # Decode response
             input_len = inputs['input_ids'].shape[1]
@@ -190,10 +245,26 @@ class ImageAnalysisTool(BaseTool):
                 skip_special_tokens=True
             )
             
+            # Clean up CUDA memory if we're using it
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
             return self._parse_model_response(response)
             
         except Exception as e:
             logger.error(f"Error in image analysis: {str(e)}")
+            # If we get a CUDA error, permanently switch to CPU mode
+            if "CUDA" in str(e) or "cuda" in str(e) or "kernel image" in str(e):
+                logger.warning("CUDA error detected, switching to CPU mode permanently")
+                self.device = "cpu"
+                if self.model is not None:
+                    try:
+                        logger.info("Moving model to CPU permanently")
+                        self.model = self.model.to("cpu")
+                    except Exception as move_err:
+                        logger.error(f"Error moving model to CPU: {str(move_err)}")
+                        self.model = None
+            
             return self._fallback_detection()
 
     def _parse_model_response(self, response: str) -> List[Dict[str, Any]]:
@@ -217,7 +288,6 @@ class ImageAnalysisTool(BaseTool):
                 else:
                     quantity = "1"
                     name = item
-                    
             items.append({
                 "name": name.strip().lower(),
                 "quantity": quantity.strip()
@@ -227,6 +297,32 @@ class ImageAnalysisTool(BaseTool):
     def _fallback_detection(self) -> List[Dict[str, Any]]:
         """Fallback method when image processing fails."""
         return [{"name": "unknown item", "quantity": "1"}]
+
+    def detectItems(self, image_path: str) -> List[str]:
+        """
+        Detect food items in an image and return a list of item names.
+        This method is specifically designed for pantry detection.
+        
+        Args:
+            image_path: Path to the image file
+            
+        Returns:
+            List of detected item names (strings only)
+        """
+        try:
+            # Use the existing image analysis functionality
+            detected_items = self.__call__(image_path)
+            
+            # Extract just the item names for pantry filtering
+            item_names = [item["name"] for item in detected_items if item["name"] != "unknown item"]
+            
+            logger.info(f"Detected {len(item_names)} pantry items: {item_names}")
+            return item_names
+            
+        except Exception as e:
+            logger.error(f"Error detecting pantry items: {e}")
+            # Return empty list if detection fails
+            return []
 
 class ShoppingListItem:
     """Represents a single item in the shopping list."""
@@ -254,128 +350,14 @@ class ShoppingListAgent:
     def __init__(self):
         self.image_analyzer = ImageAnalysisTool()
         self.items = set()  # Use set to avoid duplicates
-        self.qr_output_dir = Path("qr_codes")
-        self.qr_output_dir.mkdir(exist_ok=True)
         
-    def add_from_image(self, image_path: str) -> bool:
-        """Analyze an image and add detected items to the shopping list."""
-        try:
-            detected_items = self.image_analyzer(image_path)
-            for item in detected_items:
-                self.items.add(ShoppingListItem(item["name"], item["quantity"]))
-            return True
-        except Exception as e:
-            logger.error(f"Failed to process image {image_path}: {str(e)}")
-            return False
-    
     def clear_list(self):
         """Clear the current shopping list."""
         self.items.clear()
-    
     def get_list(self) -> List[Dict[str, str]]:
         """Get the current shopping list in a structured format."""
         return [{"name": item.name, "quantity": item.quantity} 
                 for item in sorted(self.items, key=lambda x: x.name)]
-    
-    def merge_quantities(self, items: List[ShoppingListItem]) -> List[ShoppingListItem]:
-        """Merge quantities for duplicate items."""
-        merged = {}
-        for item in items:
-            if item.name in merged:
-                try:
-                    merged[item.name].quantity = str(
-                        float(merged[item.name].quantity) + float(item.quantity)
-                    )
-                except ValueError:
-                    # If conversion fails, keep the larger quantity
-                    if float(item.quantity) > float(merged[item.name].quantity):
-                        merged[item.name].quantity = item.quantity
-            else:
-                merged[item.name] = item
-        return list(merged.values())
-    
-    def generate_qr_code(self, filename: str = None) -> str:
-        """Generate QR code for the current shopping list.
-        
-        Args:
-            filename (str, optional): Name for the QR code file. 
-                If None, a UUID will be generated.
-                
-        Returns:
-            str: Path to the generated QR code image
-        """
-        try:
-            # Get current list and convert to JSON
-            shopping_list = self.get_list()
-            list_data = json.dumps(shopping_list)
-            
-            # Generate QR code
-            qr = qrcode.QRCode(
-                version=1,
-                error_correction=qrcode.constants.ERROR_CORRECT_L,
-                box_size=10,
-                border=4,
-            )
-            qr.add_data(list_data)
-            qr.make(fit=True)
-            
-            # Create QR code image
-            qr_image = qr.make_image(fill_color="black", back_color="white")
-            
-            # Generate filename if not provided
-            if not filename:
-                filename = f"shopping_list_{uuid.uuid4().hex[:8]}.png"
-            
-            # Ensure .png extension
-            if not filename.lower().endswith('.png'):
-                filename += '.png'
-                
-            # Save QR code
-            output_path = self.qr_output_dir / filename
-            qr_image.save(output_path)
-            logger.info(f"Generated QR code: {output_path}")
-            return str(output_path)
-            
-        except Exception as e:
-            logger.error(f"Failed to generate QR code: {str(e)}")
-            return ""
-    
-    def decode_qr_code(self, image_path: str) -> bool:
-        """Decode a shopping list from a QR code image.
-        
-        Args:
-            image_path (str): Path to the QR code image
-            
-        Returns:
-            bool: True if successfully decoded and added items
-        """
-        try:
-            # Open image
-            image = Image.open(image_path)
-            
-            # Decode QR code
-            qr = qrcode.QRCode()
-            qr.add_data("")  # Clear any existing data
-            qr.decode(image)
-            data = qr.get_matrix()
-            
-            if not data:
-                logger.error("No QR code data found in image")
-                return False
-                
-            # Parse JSON data
-            shopping_list = json.loads(data)
-            
-            # Add items to current list
-            for item in shopping_list:
-                self.items.add(ShoppingListItem(item["name"], item["quantity"]))
-                
-            logger.info(f"Successfully imported {len(shopping_list)} items from QR code")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to decode QR code: {str(e)}")
-            return False
     
     def process_image(self, image_path: str, preferences: Dict[str, Any] = None) -> Dict[str, List[Dict[str, Any]]]:
         """Process an image and generate a shopping list with consideration for preferences.

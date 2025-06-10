@@ -124,28 +124,33 @@ The app processes your fridge image using computer vision to detect food items. 
 ## Project Structure
 
 ```
-gradio_shop_list_app/
-├── app.py              # Main Gradio application
-├── config.py           # Configuration settings
-├── utils.py            # Utility functions and classes
-├── test_utils.py       # Unit tests
-└── requirements.txt    # Project dependencies
+smart_shopping_list/
+├── app.py                  # Main Gradio application
+├── llama_agents.py         # ImageAnalysisTool and ShoppingListAgent  
+├── meal_planner.py         # MealPlannerService with OpenAI integration
+├── requirements.txt        # Project dependencies
+├── run_app.ps1            # PowerShell startup script
+├── README.md              # Documentation
+├── .env                   # Environment variables (API keys)
+└── qr_codes/              # Generated QR code files
 ```
 
 ## Dependencies
 
-- gradio: Web interface
-- opencv-python: Image processing
-- pillow: Image handling
-- qrcode: QR code generation
-- numpy: Numerical operations
+- **gradio**: Web interface framework
+- **torch & transformers**: Deep learning and model execution
+- **pillow**: Image processing
+- **qrcode**: QR code generation
+- **openai**: GPT-4o mini integration for meal planning
+- **llama-index**: Agent framework for image analysis
+- **loguru**: Enhanced logging
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run tests to ensure everything works
+4. Test the complete workflow
 5. Submit a pull request
 
 ## License
