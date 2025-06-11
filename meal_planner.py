@@ -5,7 +5,7 @@ AI Meal Planner service using OpenAI GPT-4o mini.
 import os
 import json
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass
 
 # Set OpenMP environment variable to handle multiple runtime versions
@@ -81,6 +81,10 @@ class MealPlannerService:
                 max_tokens=5
             )
             logger.info("OpenAI API connection test successful")
+            
+            # Initialize SmartShoppingList module
+            self.smart_shopping_list = SmartShoppingList(self)
+            logger.info("SmartShoppingList module initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {str(e)}")
@@ -527,3 +531,266 @@ Important: Return ONLY the JSON object, no additional text or explanation."""
         except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Failed to parse shopping list response: {e}")
             raise
+
+class SmartShoppingList:
+    """
+    Unified module for generating shopping lists from meal plans and filtering
+    them based on user's existing inventory through image analysis.
+    """
+    def __init__(self, meal_planner_service: 'MealPlannerService'):
+        """
+        Initialize the SmartShoppingList module.
+        
+        Args:
+            meal_planner_service: Instance of MealPlannerService for meal plan processing
+        """
+        self.meal_planner = meal_planner_service
+        self.image_analyzer = None
+          # Initialize ImageAnalysisTool
+        try:
+            from llama_agents import get_image_analyzer
+            self.image_analyzer = get_image_analyzer()
+            logger.info("✅ ImageAnalysisTool initialized successfully")
+        except Exception as e:
+            logger.error(f"ImageAnalysisTool initialization failed: {e}")
+            self.image_analyzer = None
+    
+    def generate_list(self, meal_plan_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Step 1: Generate initial comprehensive shopping list from meal plan data.
+        
+        Args:
+            meal_plan_data: List of daily meal plans with breakfast, lunch, dinner
+            
+        Returns:
+            Dict containing the initial shopping list or error information
+        """
+        try:
+            logger.info("Step 1: Generating initial shopping list from meal plan")
+            
+            # Use the existing meal planner service to generate initial list
+            result = self.meal_planner._generate_initial_shopping_list(meal_plan_data)
+            
+            logger.info(f"Generated initial shopping list with {len(result)} categories")
+            return {
+                "success": True,
+                "shopping_list": result
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating initial shopping list: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to generate shopping list: {str(e)}"
+            }
+    
+    def filter_list(self, initial_shopping_list: List[Dict[str, Any]], user_images: Union[str, List[str]]) -> Dict[str, Any]:
+        """
+        Step 2: Filter shopping list by removing items detected in user's inventory images.
+        
+        Args:
+            initial_shopping_list: Initial shopping list from generate_list()
+            user_images: Single image path or list of image paths for inventory analysis
+            
+        Returns:
+            Dict containing the filtered shopping list
+        """
+        try:
+            logger.info("Step 2: Filtering shopping list based on inventory detection")
+            
+            if not self.image_analyzer:
+                logger.warning("ImageAnalysisTool not available, returning original list")
+                return {
+                    "success": True,
+                    "shopping_list": initial_shopping_list,
+                    "removed_items": [],
+                    "message": "Image analysis not available, showing full list"
+                }
+            
+            # Handle both single image and multiple images
+            if isinstance(user_images, str):
+                user_images = [user_images]
+              # Detect items from all provided images
+            detected_items = []
+            for image_path in user_images:
+                try:
+                    logger.info(f"Analyzing image: {image_path}")
+                    items = self.image_analyzer.detectItems(image_path)
+                    logger.info(f"Raw detected items from {image_path}: {items}")
+                    
+                    # Filter out problematic items
+                    valid_items = []
+                    for item in items:
+                        item_clean = item.lower().strip()
+                        # Skip items that are too generic or short
+                        if (len(item_clean) >= 3 and 
+                            item_clean not in ['unknown', 'item', 'food', 'unknown item'] and
+                            not item_clean.startswith('unknown')):
+                            valid_items.append(item_clean)
+                        else:
+                            logger.info(f"Filtered out generic/short item: '{item}'")
+                    
+                    detected_items.extend(valid_items)
+                    logger.info(f"Valid items from {image_path}: {valid_items}")
+                except Exception as e:
+                    logger.warning(f"Failed to analyze image {image_path}: {e}")
+            
+            # Remove duplicates and normalize detected items
+            detected_items = list(set(detected_items))
+            logger.info(f"Final detected inventory items: {detected_items} (total: {len(detected_items)})")
+            
+            # Safety check: if too many items detected, something might be wrong
+            if len(detected_items) > 50:
+                logger.warning(f"Unusually high number of detected items ({len(detected_items)}). Using fallback approach.")
+                detected_items = detected_items[:20]  # Limit to first 20 items
+              # Filter the shopping list
+            filtered_list = []
+            removed_items = []
+            
+            for category in initial_shopping_list:
+                filtered_category = {
+                    "category": category["category"],
+                    "items": []
+                }
+                
+                for item in category["items"]:
+                    item_name = item["item"].lower().strip()
+                    
+                    # More precise matching logic
+                    is_in_inventory = False
+                    
+                    # Only check if we have detected items (avoid matching when no items detected)
+                    if detected_items:
+                        # Check for exact matches or meaningful partial matches
+                        for detected_item in detected_items:
+                            detected_item_clean = detected_item.lower().strip()
+                            
+                            # Skip empty or very short detected items
+                            if len(detected_item_clean) < 3:
+                                continue
+                                
+                            # Exact match
+                            if item_name == detected_item_clean:
+                                is_in_inventory = True
+                                logger.info(f"Exact match: '{item_name}' == '{detected_item_clean}'")
+                                break
+                            
+                            # Meaningful partial match (both directions, but with length check)
+                            # Only match if the detected item is substantial (>3 chars) and significantly overlaps
+                            if (len(detected_item_clean) >= 4 and 
+                                (detected_item_clean in item_name or item_name in detected_item_clean)):
+                                # Additional check: ensure the match is meaningful (>50% overlap)
+                                overlap_ratio = min(len(detected_item_clean), len(item_name)) / max(len(detected_item_clean), len(item_name))
+                                if overlap_ratio > 0.5:
+                                    is_in_inventory = True
+                                    logger.info(f"Partial match: '{item_name}' <-> '{detected_item_clean}' (overlap: {overlap_ratio:.2f})")
+                                    break
+                    
+                    if is_in_inventory:
+                        # Item found in inventory - remove from shopping list
+                        removed_items.append({
+                            "item": item["item"],
+                            "quantity": item["quantity"],
+                            "category": category["category"]
+                        })
+                        logger.info(f"Removed '{item['item']}' - found in inventory")
+                    else:
+                        # Item not in inventory - keep in shopping list
+                        filtered_category["items"].append(item)
+                        logger.debug(f"Kept '{item['item']}' - not found in inventory")
+                  # Only add category if it has remaining items
+                if filtered_category["items"]:
+                    filtered_list.append(filtered_category)
+            
+            logger.info(f"Filtering complete: {len(removed_items)} items removed from {sum(len(cat['items']) for cat in initial_shopping_list)} total items")
+            
+            # Safety check: if we removed everything, something is wrong
+            total_initial_items = sum(len(cat['items']) for cat in initial_shopping_list)
+            if len(removed_items) >= total_initial_items:
+                logger.warning("All items were removed! This seems incorrect. Returning original list.")
+                return {
+                    "success": True,
+                    "shopping_list": initial_shopping_list,
+                    "removed_items": [],
+                    "detected_inventory": detected_items,
+                    "message": "Safety check: Returned full list to avoid removing all items"
+                }
+            
+            # Another safety check: if we removed more than 80% of items, be cautious
+            removal_percentage = len(removed_items) / total_initial_items if total_initial_items > 0 else 0
+            if removal_percentage > 0.8:
+                logger.warning(f"Removed {removal_percentage:.1%} of items. This seems high. Please review.")
+            
+            return {
+                "success": True,
+                "shopping_list": filtered_list,
+                "removed_items": removed_items,
+                "detected_inventory": detected_items
+            }
+            
+        except Exception as e:
+            logger.error(f"Error filtering shopping list: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to filter shopping list: {str(e)}",
+                "shopping_list": initial_shopping_list  # Return original on error
+            }
+    
+    def generate_smart_shopping_list(self, meal_plan_data: List[Dict[str, Any]], user_images: Union[str, List[str]] = None) -> Dict[str, Any]:
+        """
+        Complete workflow: Generate shopping list from meal plan and filter based on inventory.
+        
+        Args:
+            meal_plan_data: List of daily meal plans
+            user_images: Optional image(s) for inventory analysis
+            
+        Returns:
+            Dict containing the final filtered shopping list
+        """
+        try:
+            logger.info("Starting complete SmartShoppingList workflow")
+            
+            # Step 1: Generate initial list
+            initial_result = self.generate_list(meal_plan_data)
+            if not initial_result["success"]:
+                return initial_result
+            
+            initial_shopping_list = initial_result["shopping_list"]
+            
+            # Step 2: Filter list if images provided
+            if user_images:
+                filter_result = self.filter_list(initial_shopping_list, user_images)
+                if filter_result["success"]:
+                    return {
+                        "success": True,
+                        "shopping_list": filter_result["shopping_list"],
+                        "removed_items": filter_result.get("removed_items", []),
+                        "detected_inventory": filter_result.get("detected_inventory", []),
+                        "workflow_complete": True
+                    }
+                else:
+                    # Return initial list if filtering failed
+                    return {
+                        "success": True,
+                        "shopping_list": initial_shopping_list,
+                        "error": filter_result.get("error"),
+                        "workflow_complete": False
+                    }
+            else:
+                # No images provided - return initial list
+                logger.info("No inventory images provided, returning initial shopping list")
+                return {
+                    "success": True,
+                    "shopping_list": initial_shopping_list,
+                    "removed_items": [],
+                    "detected_inventory": [],
+                    "workflow_complete": True,
+                    "message": "No inventory analysis performed"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in complete SmartShoppingList workflow: {e}")
+            return {
+                "success": False,
+                "error": f"SmartShoppingList workflow failed: {str(e)}"
+            }
